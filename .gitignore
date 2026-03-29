@@ -33,3 +33,4 @@ client_secret*
 .ipynb_checkpoints/
 
 # Data (add specific large data files here)
+data/raw/
