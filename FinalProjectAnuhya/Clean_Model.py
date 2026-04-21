@@ -13,7 +13,10 @@ import plotly.express as px
 import sklearn
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error
+from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
+from sklearn.metrics import f1_score, mean_squared_error, r2_score, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
+from matplotlib.patches import Patch
 from scipy import stats
 
 BASE_PATH = "C:\\Users\\anuhy\\DS2500\\FinalProject\\"
@@ -21,6 +24,17 @@ df = pd.read_csv(BASE_PATH + "U.S._Chronic_Disease_Indicators (1).csv")
 
 PREVALENCE_TYPES = ["crude prevalence", "age-adjusted prevalence"]
 SIGNIFICANCE = 0.05
+
+SIGNIFICANT_MENTAL = [
+    "Depression among adults",
+    "Frequent mental distress among adults",
+    "Postpartum depressive symptoms among women with a recent live birth"
+]
+
+SIGNIFICANT_ALCOHOL = [
+    "Binge drinking prevalence among adults",
+    "Per capita alcohol consumption among people aged 14 years and older"
+]
 
 
 def save_results(disease, filename):
@@ -309,12 +323,10 @@ def plot_indicator_rates(indicator_df, pvalue_df, topic, year):
                     va="center", fontsize=8,
                     fontweight="bold" if row.pvalue < SIGNIFICANCE else "normal")
 
-    # bold y-axis labels for significant indicators
     for label, p in zip(ax.get_yticklabels(), merged["pvalue"]):
         if p < SIGNIFICANCE:
             label.set_fontweight("bold")
 
-    from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor="steelblue", label="p < 0.05 (significant)"),
                        Patch(facecolor="lightgray", label="p ≥ 0.05 (not significant)")]
     ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
@@ -357,7 +369,7 @@ def plot_regression_trends(indicator_df, topic, year):
         return
 
     max_slope = max(slopes.values())
-    threshold = max_slope * 0.5  # top half of slopes highlighted
+    threshold = max_slope * 0.5
 
     for question in questions:
         subset = indicator_df[indicator_df["Question"] == question].dropna()
@@ -472,9 +484,7 @@ def plot_state_scatter_per_indicator(dataframe, year, topic):
 
         mean_y = np.mean(y)
         std_y = np.std(y)
-        colors = ["tomato" if val > mean_y + std_y else
-                  "steelblue" if val < mean_y - std_y else
-                  "steelblue" for val in y]
+        colors = ["tomato" if val > mean_y + std_y else "steelblue" for val in y]
 
         plt.figure(figsize=(12, 6))
         plt.scatter(x, y, c=colors, alpha=0.7)
@@ -597,7 +607,6 @@ def plot_stratification_comparison(dataframe, year, topic):
 
     ax.axvline(x=SIGNIFICANCE, color="red", linestyle="--", label="p=0.05 threshold")
 
-    from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor="steelblue", label="p < 0.05 (significant)"),
                        Patch(facecolor="lightgray", label="p ≥ 0.05 (not significant)")]
     ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
@@ -693,7 +702,6 @@ def plot_cross_correlation(alcohol_df, mental_df, year):
 
     corr_vals = corr_matrix.astype(float)
 
-    # build annotation matrix with stars for strong correlations
     annot_matrix = corr_vals.copy().astype(object)
     for row in corr_vals.index:
         for col in corr_vals.columns:
@@ -760,8 +768,233 @@ def plot_cross_topic_scatter(alcohol_df, mental_df, year):
     print(f"Cross topic scatter saved for {year}")
 
 
+def prepare_model_data(dataframe, all_questions):
+    """
+    Build a feature matrix using all years and stratifications,
+    keeping only specified indicators as features.
+
+    Parameters: dataframe, dataframe
+                list, all_questions
+
+    Returns: dataframe, with features and target column
+    """
+    filtered = dataframe[
+        dataframe["Question"].isin(all_questions) &
+        dataframe["DataValueType"].str.lower().isin(PREVALENCE_TYPES)
+    ].copy().dropna(subset=["DataValue"])
+
+    le = LabelEncoder()
+    filtered["StratCode"] = le.fit_transform(filtered["Stratification1"].astype(str))
+
+    pivot = filtered.groupby(
+        ["YearStart", "LocationAbbr", "StratCode", "Question"]
+    )["DataValue"].mean().unstack("Question").reset_index()
+
+    pivot.columns.name = None
+    pivot = pivot.dropna(thresh=len(pivot.columns) - 3)
+    return pivot
+
+
+def bin_disease_rates(series):
+    """
+    Bin continuous disease rates into low/medium/high categories
+    based on mean ± 0.5 std dev.
+
+    Parameters: series, continuous prevalence rates
+
+    Returns: series, binned labels as strings
+    """
+    mean = series.mean()
+    std = series.std()
+    bins = []
+    for val in series:
+        if val < mean - 0.5 * std:
+            bins.append("low")
+        elif val > mean + 0.5 * std:
+            bins.append("high")
+        else:
+            bins.append("medium")
+    return pd.Series(bins, index=series.index)
+
+
+def find_best_k_regressor(X_train, y_train, X_val, y_val, max_k=20):
+    """
+    Find best K for KNN regressor using MSE on validation set.
+
+    Parameters: X_train, y_train, X_val, y_val
+                int, max_k
+
+    Returns: int, best_k
+    """
+    best_k = 1
+    best_mse = float("inf")
+
+    for k in range(1, max_k + 1):
+        model = KNeighborsRegressor(n_neighbors=k)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_val)
+        mse = mean_squared_error(y_val, preds)
+        if mse < best_mse:
+            best_mse = mse
+            best_k = k
+
+    print(f"Best K (Regressor): {best_k} with MSE={best_mse:.4f}")
+    return best_k
+
+
+def find_best_k_classifier(X_train, y_train, X_val, y_val, max_k=20):
+    """
+    Find best K for KNN classifier using weighted F1 on validation set.
+
+    Parameters: X_train, y_train, X_val, y_val
+                int, max_k
+
+    Returns: int, best_k
+    """
+    best_k = 1
+    best_f1 = 0
+
+    for k in range(1, max_k + 1):
+        model = KNeighborsClassifier(n_neighbors=k)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_val)
+        f1 = f1_score(y_val, preds, average="weighted")
+        if f1 > best_f1:
+            best_f1 = f1
+            best_k = k
+
+    print(f"Best K (Classifier): {best_k} with F1={best_f1:.4f}")
+    return best_k
+
+
+def run_knn_models(dataframe, all_questions, target_question, topic):
+    """
+    Prepare data, train KNN regressor and classifier predicting disease
+    prevalence from all other indicators. Train/test split is random across
+    all years and demographics.
+
+    Parameters: dataframe, dataframe
+                list, all_questions, all indicators to use as features
+                str, target_question, indicator to predict
+                str, topic
+
+    Returns: None
+    """
+    model_df = prepare_model_data(dataframe, all_questions)
+
+    if model_df.empty:
+        print(f"Not enough data for KNN models for {topic}")
+        return
+
+    target_col = target_question
+    if target_col not in model_df.columns:
+        print(f"Target column not found for {topic}")
+        return
+
+    model_df = model_df.dropna(subset=[target_col])
+
+    feature_cols = sorted([c for c in model_df.columns
+                           if c not in ["YearStart", "LocationAbbr", "StratCode", target_col]])
+
+    model_df = model_df.dropna(subset=feature_cols)
+
+    if len(model_df) < 10:
+        print(f"Not enough data points for {topic}")
+        return
+
+    X = model_df[feature_cols]
+    y_reg = model_df[target_col]
+    y_clf = bin_disease_rates(y_reg)
+
+    col_min = X.min()
+    col_max = X.max()
+    col_range = (col_max - col_min).replace(0, 1)
+    X_scaled = (X - col_min) / col_range
+
+    X_train, X_test, y_train_reg, y_test_reg = train_test_split(
+        X_scaled, y_reg, test_size=0.2, random_state=2500)
+    y_train_clf = y_clf.loc[y_train_reg.index]
+    y_test_clf = y_clf.loc[y_test_reg.index]
+
+    X_tr, X_val, y_tr_reg, y_val_reg = train_test_split(
+        X_train, y_train_reg, test_size=0.2, random_state=2500)
+    y_tr_clf = y_train_clf.loc[y_tr_reg.index]
+    y_val_clf = y_train_clf.loc[y_val_reg.index]
+
+    best_k_reg = find_best_k_regressor(X_tr, y_tr_reg, X_val, y_val_reg)
+    reg_model = KNeighborsRegressor(n_neighbors=best_k_reg)
+    reg_model.fit(X_train, y_train_reg)
+    reg_preds = reg_model.predict(X_test)
+    mse = mean_squared_error(y_test_reg, reg_preds)
+    r2 = r2_score(y_test_reg, reg_preds)
+    print(f"\n{topic} KNN Regressor:")
+    print(f"  MSE: {mse:.4f}")
+    print(f"  R²:  {r2:.4f}")
+
+    best_k_clf = find_best_k_classifier(X_tr, y_tr_clf, X_val, y_val_clf)
+    clf_model = KNeighborsClassifier(n_neighbors=best_k_clf)
+    clf_model.fit(X_train, y_train_clf)
+    clf_preds = clf_model.predict(X_test)
+    f1 = f1_score(y_test_clf, clf_preds, average="weighted")
+    print(f"\n{topic} KNN Classifier:")
+    print(f"  F1 (weighted): {f1:.4f}")
+
+    plot_knn_regression_results(y_test_reg.values, reg_preds, topic)
+    plot_knn_classification_results(y_test_clf.values, clf_preds, topic)
+
+
+def plot_knn_regression_results(y_true, y_pred, topic):
+    """
+    Plot predicted vs actual disease rates for KNN regressor.
+
+    Parameters: array, y_true
+                array, y_pred
+                str, topic
+
+    Returns: None
+    """
+    plt.figure(figsize=(8, 6))
+    plt.scatter(y_true, y_pred, alpha=0.6, color="steelblue")
+    min_val = min(y_true.min(), y_pred.min())
+    max_val = max(y_true.max(), y_pred.max())
+    plt.plot([min_val, max_val], [min_val, max_val],
+             color="red", linestyle="--", label="Perfect prediction")
+    plt.xlabel("Actual Disease Rate")
+    plt.ylabel("Predicted Disease Rate")
+    plt.title(f"{topic} KNN Regressor: Predicted vs Actual (2022)")
+    plt.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(BASE_PATH + f"{topic.replace(' ', '_')}_knn_regression.png")
+    plt.show()
+    print(f"KNN regression plot saved for {topic}")
+
+
+def plot_knn_classification_results(y_true, y_pred, topic):
+    """
+    Plot confusion matrix heatmap for KNN classifier predictions.
+
+    Parameters: array, y_true
+                array, y_pred
+                str, topic
+
+    Returns: None
+    """
+    labels = ["low", "medium", "high"]
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+    plt.figure(figsize=(7, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=labels, yticklabels=labels)
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title(f"{topic} KNN Classifier: Confusion Matrix (2022)")
+    plt.tight_layout()
+    plt.savefig(BASE_PATH + f"{topic.replace(' ', '_')}_knn_classifier.png")
+    plt.show()
+    print(f"KNN classifier plot saved for {topic}")
+
+
 def main():
-    # save disease-specific CSVs
     save_results("Mental Health", "mental_health_data.csv")
     save_results("Alcohol", "alcohol_data.csv")
 
@@ -773,7 +1006,6 @@ def main():
 
     year = int(input("Enter a year to analyze: "))
 
-    # --- INDICATOR ANALYSIS ---
     mental_rates = get_indicator_rates(mental_health_df, year)
     alcohol_rates = get_indicator_rates(alcohol_df, year)
 
@@ -790,6 +1022,7 @@ def main():
     print("\nAlcohol P-Values:")
     print(alcohol_pvalues)
 
+    """
     plot_indicator_rates(mental_rates, mental_pvalues, "Mental Health", year)
     plot_indicator_rates(alcohol_rates, alcohol_pvalues, "Alcohol", year)
 
@@ -804,11 +1037,9 @@ def main():
     plot_state_scatter_per_indicator(mental_health_df, year, "Mental Health")
     plot_state_scatter_per_indicator(alcohol_df, year, "Alcohol")
 
-    # --- STATE ANALYSIS ---
     plot_choropleth(mental_health_df, year, "Mental Health")
     plot_choropleth(alcohol_df, year, "Alcohol")
 
-    # --- DEMOGRAPHIC ANALYSIS ---
     strat_categories = mental_health_df["StratificationCategory1"].dropna().unique()
     strat_categories = [s for s in strat_categories if s != "Overall"]
 
@@ -819,10 +1050,13 @@ def main():
     plot_stratification_comparison(mental_health_df, year, "Mental Health")
     plot_stratification_comparison(alcohol_df, year, "Alcohol")
 
-    # --- CROSS TOPIC ANALYSIS ---
     plot_cross_topic_choropleth(alcohol_df, mental_health_df, year)
     plot_cross_topic_scatter(alcohol_df, mental_health_df, year)
     plot_cross_correlation(alcohol_df, mental_health_df, year)
+    """
+
+    run_knn_models(mental_health_df, list(mental_health_df["Question"].unique()), SIGNIFICANT_MENTAL[0], "Mental Health")
+    run_knn_models(alcohol_df, list(alcohol_df["Question"].unique()), SIGNIFICANT_ALCOHOL[0], "Alcohol")
 
 
 if __name__ == "__main__":
