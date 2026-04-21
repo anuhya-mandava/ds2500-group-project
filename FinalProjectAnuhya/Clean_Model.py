@@ -1022,7 +1022,6 @@ def main():
     print("\nAlcohol P-Values:")
     print(alcohol_pvalues)
 
-    """
     plot_indicator_rates(mental_rates, mental_pvalues, "Mental Health", year)
     plot_indicator_rates(alcohol_rates, alcohol_pvalues, "Alcohol", year)
 
@@ -1053,7 +1052,6 @@ def main():
     plot_cross_topic_choropleth(alcohol_df, mental_health_df, year)
     plot_cross_topic_scatter(alcohol_df, mental_health_df, year)
     plot_cross_correlation(alcohol_df, mental_health_df, year)
-    """
 
     run_knn_models(mental_health_df, list(mental_health_df["Question"].unique()), SIGNIFICANT_MENTAL[0], "Mental Health")
     run_knn_models(alcohol_df, list(alcohol_df["Question"].unique()), SIGNIFICANT_ALCOHOL[0], "Alcohol")
